@@ -188,7 +188,11 @@
                 <div class="glass-card col-12">
                     <div class="card-title-area">
                         <h2 class="card-title"><i class="fa-solid fa-receipt"></i>매일 이체 내역 &amp; 세금계산서 체크</h2>
-                        <div style="display: flex; gap: 0.75rem;">
+                        <div style="display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
+                            <button id="btn-import-excel" class="btn-primary" style="background: var(--success); box-shadow: 0 4px 10px var(--success-glow); font-size: 0.88rem;" title="은행 인터넷뱅킹 이체결과 엑셀 또는 CSV 파일을 선택하면 날짜, 거래처, 금액, 적요가 자동으로 등록됩니다.">
+                                <i class="fa-solid fa-file-excel"></i> 은행 엑셀/CSV 일괄 등록
+                            </button>
+                            <input type="file" id="bank-excel-input" accept=".xlsx, .xls, .csv" style="display: none;">
                             <button id="btn-filter-invoice" class="btn-secondary"><i class="fa-solid fa-filter"></i> 계산서 미완료만</button>
                             <button id="btn-export-transfers" class="btn-secondary"><i class="fa-solid fa-file-excel"></i> 내보내기</button>
                         </div>
@@ -560,6 +564,8 @@
         </div>
     </div>
 
+    <!-- SheetJS (엑셀 xlsx/xls/csv 파싱 라이브러리) -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <!-- 데이터 관리 및 로직 JS 파일 로드 -->
     <script src="app.js"></script>
 </body>

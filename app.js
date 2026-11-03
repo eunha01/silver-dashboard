@@ -1840,6 +1840,264 @@ function importFullBackupJSON(e) {
 }
 
 // ==========================================
+// 10.2 은행 이체 엑셀/CSV 자동 업로드 및 일괄 등록
+// ==========================================
+
+function initBankExcelImport() {
+    const btnImport = document.getElementById('btn-import-excel');
+    const fileInput = document.getElementById('bank-excel-input');
+
+    if (btnImport && fileInput) {
+        btnImport.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', handleBankExcelFile);
+    }
+}
+
+function handleBankExcelFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = function(evt) {
+        try {
+            const data = new Uint8Array(evt.target.result);
+            if (typeof XLSX === 'undefined') {
+                alert("엑셀 처리 라이브러리를 불러오는 중입니다. 잠시 후 다시 시도해 주세요.");
+                return;
+            }
+
+            const workbook = XLSX.read(data, { type: 'array' });
+            if (!workbook || !workbook.SheetNames || workbook.SheetNames.length === 0) {
+                alert("엑셀 파일에서 시트를 찾을 수 없습니다.");
+                return;
+            }
+
+            const sheetName = workbook.SheetNames[0];
+            const sheet = workbook.Sheets[sheetName];
+            const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+
+            if (!rawRows || rawRows.length === 0) {
+                alert("엑셀 파일에 데이터가 비어 있습니다.");
+                return;
+            }
+
+            processBankRows(rawRows, file.name);
+        } catch (err) {
+            alert("엑셀 파일을 분석하는 중 오류가 발생했습니다: " + err.message);
+        }
+    };
+    reader.readAsArrayBuffer(file);
+    e.target.value = '';
+}
+
+function processBankRows(rows, fileName) {
+    let headerRowIdx = -1;
+    let colDate = -1;
+    let colVendor = -1;
+    let colAmount = -1;
+    let colMemo = -1;
+    let colResult = -1;
+
+    for (let i = 0; i < Math.min(rows.length, 10); i++) {
+        const row = rows[i].map(cell => String(cell).replace(/\s+/g, ''));
+        
+        let foundDate = row.findIndex(c => c.includes('거래일시') || c.includes('거래일자') || c.includes('이체일시') || c.includes('이체일자') || c.includes('거래일'));
+        let foundVendor = row.findIndex(c => c.includes('수취인성명') || c.includes('수취인명') || c.includes('입금계좌예금주명') || c.includes('받는분') || c.includes('거래처명') || c.includes('거래처') || c.includes('수취인'));
+        let foundAmount = row.findIndex(c => c.includes('처리금액') || c.includes('이체금액') || c.includes('출금금액') || c.includes('보낸금액') || c.includes('금액'));
+        let foundMemo = row.findIndex(c => c.includes('거래메모') || c.includes('출금통장표시내용') || c.includes('적요') || c.includes('비고') || c.includes('내용'));
+        let foundResult = row.findIndex(c => c.includes('처리결과') || c.includes('결과') || c.includes('상태'));
+
+        if (foundDate !== -1 && (foundVendor !== -1 || foundAmount !== -1)) {
+            headerRowIdx = i;
+            colDate = foundDate;
+            colVendor = foundVendor !== -1 ? foundVendor : row.findIndex(c => c.includes('수취인') || c.includes('예금주'));
+            colAmount = foundAmount;
+            colMemo = foundMemo;
+            colResult = foundResult;
+            break;
+        }
+    }
+
+    if (headerRowIdx === -1 || colDate === -1 || colAmount === -1) {
+        alert("은행 이체 엑셀 양식의 헤더(거래일시, 수취인성명, 처리금액 등)를 찾을 수 없습니다. 올바른 은행 이체 내역 파일인지 확인해 주세요.");
+        return;
+    }
+
+    const newTransfers = [];
+    let skippedDuplicateCount = 0;
+    let skippedInvalidCount = 0;
+    let targetYearMonth = null;
+
+    for (let r = headerRowIdx + 1; r < rows.length; r++) {
+        const row = rows[r];
+        if (!row || row.length === 0) continue;
+
+        if (colResult !== -1 && row[colResult]) {
+            const res = String(row[colResult]).trim();
+            if (res && !res.includes('정상') && !res.includes('성공') && !res.includes('완료')) {
+                skippedInvalidCount++;
+                continue;
+            }
+        }
+
+        const rowStr = row.join(' ');
+        if (rowStr.includes('합계') || rowStr.includes('소계') || rowStr.includes('총계')) {
+            continue;
+        }
+
+        const rawAmount = row[colAmount];
+        if (rawAmount === undefined || rawAmount === null || rawAmount === "") continue;
+        const amountNum = parseInt(String(rawAmount).replace(/[^0-9]/g, ''), 10);
+        if (isNaN(amountNum) || amountNum <= 0) continue;
+
+        let vendor = colVendor !== -1 ? String(row[colVendor] || '').trim() : '';
+        if (!vendor) continue;
+
+        let memo = colMemo !== -1 ? String(row[colMemo] || '').trim() : '';
+
+        const rawDate = row[colDate];
+        const dateParsed = parseBankDate(rawDate);
+        if (!dateParsed) {
+            skippedInvalidCount++;
+            continue;
+        }
+
+        const { dateStr, yearMonthStr, fullYear, monthNum } = dateParsed;
+        if (!targetYearMonth) {
+            targetYearMonth = { year: fullYear, month: monthNum - 1, ym: yearMonthStr };
+        }
+
+        let category = "과세";
+        const combinedText = `${vendor} ${memo}`;
+        if (combinedText.includes('반환') || combinedText.includes('예치') || combinedText.includes('보증금')) {
+            category = "반환";
+        } else if (combinedText.includes('면세') || combinedText.includes('생두')) {
+            category = "면세";
+        } else if (combinedText.includes('머신') || combinedText.includes('대금')) {
+            category = "머신대금";
+        }
+
+        const isDuplicate = state.transfers.some(t => 
+            t.yearMonth === yearMonthStr &&
+            t.date === dateStr &&
+            t.vendor === vendor &&
+            t.amount === amountNum
+        );
+
+        if (isDuplicate) {
+            skippedDuplicateCount++;
+            continue;
+        }
+
+        newTransfers.push({
+            id: Date.now() + Math.random(),
+            date: dateStr,
+            vendor: vendor,
+            amount: amountNum,
+            category: category,
+            invoice: category === "반환" ? "반환 완료" : "",
+            memo: memo,
+            completed: category === "반환",
+            yearMonth: yearMonthStr
+        });
+    }
+
+    if (newTransfers.length === 0) {
+        if (skippedDuplicateCount > 0) {
+            alert(`선택하신 엑셀 파일의 내역(${skippedDuplicateCount}건)이 이미 대시보드에 모두 등록되어 있어 중복 추가되지 않았습니다.`);
+        } else {
+            alert("엑셀 파일에서 등록 가능한 유효한 이체 내역을 찾지 못했습니다.");
+        }
+        return;
+    }
+
+    const updated = [...state.transfers, ...newTransfers];
+    updated.sort((a, b) => parseDateToVal(a.date) - parseDateToVal(b.date));
+    saveState('transfers', updated);
+
+    newTransfers.forEach(t => syncTransferToCalendar(t));
+
+    if (targetYearMonth) {
+        state.currentYear = targetYearMonth.year;
+        state.currentMonth = targetYearMonth.month;
+        const yearSelect = document.getElementById('global-year-select');
+        const monthSelect = document.getElementById('global-month-select');
+        if (yearSelect) yearSelect.value = state.currentYear;
+        if (monthSelect) monthSelect.value = state.currentMonth;
+        handleYearMonthChange();
+    } else {
+        renderTransfersTable();
+    }
+
+    const msg = `총 ${newTransfers.length}건의 은행 이체 내역이 자동으로 등록되었습니다!` +
+        (skippedDuplicateCount > 0 ? `\n(이미 등록된 중복 ${skippedDuplicateCount}건 제외)` : '');
+    alert(msg);
+    showToast(`${newTransfers.length}건 이체 내역 자동 등록 완료!`);
+}
+
+function parseBankDate(val) {
+    if (val === undefined || val === null || val === '') return null;
+
+    if (typeof val === 'number') {
+        const utcDays = Math.floor(val - 25569);
+        const dateObj = new Date(utcDays * 86400 * 1000);
+        if (!isNaN(dateObj.getTime())) {
+            const y = dateObj.getFullYear();
+            const m = dateObj.getMonth() + 1;
+            const d = dateObj.getDate();
+            return {
+                fullYear: y,
+                monthNum: m,
+                dateStr: `${m}/${d}`,
+                yearMonthStr: `${y}-${String(m).padStart(2, '0')}`
+            };
+        }
+    }
+
+    const str = String(val).trim();
+    const match = str.match(/(\d{4})[./-](\d{1,2})[./-](\d{1,2})/);
+    if (match) {
+        const y = parseInt(match[1], 10);
+        const m = parseInt(match[2], 10);
+        const d = parseInt(match[3], 10);
+        return {
+            fullYear: y,
+            monthNum: m,
+            dateStr: `${m}/${d}`,
+            yearMonthStr: `${y}-${String(m).padStart(2, '0')}`
+        };
+    }
+
+    const match8 = str.match(/(\d{4})(\d{2})(\d{2})/);
+    if (match8) {
+        const y = parseInt(match8[1], 10);
+        const m = parseInt(match8[2], 10);
+        const d = parseInt(match8[3], 10);
+        return {
+            fullYear: y,
+            monthNum: m,
+            dateStr: `${m}/${d}`,
+            yearMonthStr: `${y}-${String(m).padStart(2, '0')}`
+        };
+    }
+
+    const matchMD = str.match(/^(\d{1,2})\/(\d{1,2})$/);
+    if (matchMD) {
+        const m = parseInt(matchMD[1], 10);
+        const d = parseInt(matchMD[2], 10);
+        const y = state.currentYear;
+        return {
+            fullYear: y,
+            monthNum: m,
+            dateStr: `${m}/${d}`,
+            yearMonthStr: `${y}-${String(m).padStart(2, '0')}`
+        };
+    }
+
+    return null;
+}
+
+// ==========================================
 // 11. 앱 초기화 로드
 // ==========================================
 
@@ -1847,6 +2105,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initYearMonthControls();
     checkAndCreateMonthlyRecurring();
     initBackupRestore();
+    initBankExcelImport();
     
     // 테이블 헤더 클릭 정렬 이벤트 바인딩 호출
     initHeaderSortEvents();
